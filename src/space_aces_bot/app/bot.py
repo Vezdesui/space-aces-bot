@@ -96,21 +96,61 @@ def main() -> None:
     driver = modules["driver"]
 
     driver_name = type(driver).__name__
-    logger.info(
-        "[space_aces_bot] starting main loop with driver=%s",
-        driver_name,
-    )
-
-    # Start the driver once before entering the main loop, if supported.
-    if hasattr(driver, "start"):
-        try:
-            logger.info("Starting driver: %s", driver_name)
-            driver.start()  # type: ignore[call-arg]
-        except Exception:
-            logger.exception("Error while starting driver: %s", driver_name)
+    logger.info("[space_aces_bot] initialising driver=%s", driver_name)
 
     max_ticks = 20
     try:
+        # Start the driver and perform login, if supported.
+        if hasattr(driver, "start"):
+            try:
+                logger.info("Starting driver: %s", driver_name)
+                driver.start()  # type: ignore[call-arg]
+            except Exception:
+                logger.exception("Error while starting driver: %s", driver_name)
+
+        if hasattr(driver, "login"):
+            # Credentials are expected to come from config, which may be
+            # populated from .env via python-dotenv.
+            username = str(config.get("username", "")).strip()
+            password = str(config.get("password", "")).strip()
+
+            if not username or not password:
+                logger.error(
+                    "Username or password is missing in configuration; "
+                    "cannot perform login. Aborting before main loop.",
+                )
+                return
+
+            logger.info("Attempting to login to Space Aces...")
+
+            try:
+                login_ok = driver.login(username, password)  # type: ignore[call-arg]
+            except Exception:
+                # SeleniumDriver.login should already log the traceback;
+                # this handler is only a final safeguard.
+                logger.exception("Unexpected error while attempting to log in.")
+                logger.info("Login failed, stopping bot.")
+                return
+
+            if login_ok:
+                logger.info(
+                    "Login successful, starting on map '%s'.",
+                    getattr(state, "current_map", "unknown"),
+                )
+            else:
+                logger.info("Login failed, stopping bot.")
+                return
+        else:
+            logger.info(
+                "Driver %s does not support login(); starting without explicit login step.",
+                driver_name,
+            )
+
+        logger.info(
+            "[space_aces_bot] starting main loop with driver=%s",
+            driver_name,
+        )
+
         for _ in range(max_ticks):
             logger.info("Main loop tick %s", state.tick_counter)
 

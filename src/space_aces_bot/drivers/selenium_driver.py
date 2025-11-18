@@ -4,14 +4,36 @@ import logging
 from typing import Any, Mapping, Optional
 
 from selenium import webdriver
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 from space_aces_bot.core.actions import ActionType, BotAction
 from space_aces_bot.core.game_state import GameState
 from space_aces_bot.core.interfaces import Driver
 
 logger = logging.getLogger(__name__)
+
+
+# Centralized selectors and timeouts used by SeleniumDriver.
+LOGIN_SELECTORS = {
+    # Prefer explicit login fields by name; ``find_element`` will return
+    # the first match in DOM order, which corresponds to the primary
+    # login form on the Space Aces home page.
+    "username": "input[name='email'],input[name='username']",
+    "password": "input[name='password']",
+    # Fallback CSS for submit controls; actual login button is resolved
+    # primarily via ``button_xpath`` below.
+    "submit": "button[type=submit],input[type=submit],button",
+    # XPath expression targeting the primary "Sign-in" button.
+    "button_xpath": "//button[normalize-space()=\"Sign-in\"]",
+}
+
+DEFAULT_LOGIN_TIMEOUT = 20.0
+DEFAULT_LOGIN_RESULT_TIMEOUT = 20.0
 
 
 class DummyDriver(Driver):
@@ -102,6 +124,8 @@ class SeleniumDriver(Driver):
                     "Creating Chrome WebDriver using system PATH (no driver_path set)."
                 )
                 driver = webdriver.Chrome(options=options)
+
+            self._logger.info("Chrome WebDriver instance created successfully.")
         except Exception:
             self._logger.exception("Failed to create Selenium WebDriver.")
             raise
@@ -111,6 +135,7 @@ class SeleniumDriver(Driver):
     def start(self) -> None:
         """Start the Selenium driver and open the game URL."""
         if self._driver is None:
+            self._logger.info("Creating Selenium WebDriver instance.")
             self._driver = self._create_driver()
 
         url = str(self._selenium_cfg.get("game_url", "")).strip()
@@ -128,6 +153,170 @@ class SeleniumDriver(Driver):
             self._logger.exception("Error while opening game URL: %s", url)
         else:
             self._logger.info("Game page opened: %s", url)
+
+    def _is_logged_in(self) -> bool:
+        """Heuristically determine whether the user is logged in.
+
+        By default, this checks for the absence of a visible password field
+        that matches ``LOGIN_SELECTORS['password']``. Optionally, a custom
+        CSS selector ``selenium.logged_in_selector`` may be provided in the
+        configuration to positively identify the logged-in state.
+        """
+
+        if self._driver is None:
+            return False
+
+        try:
+            marker_selector = str(self._selenium_cfg.get("logged_in_selector", "")).strip()
+
+            if marker_selector:
+                elements = self._driver.find_elements(By.CSS_SELECTOR, marker_selector)
+                logged_in = bool(elements)
+                self._logger.info(
+                    "Login state check using marker selector '%s': logged_in=%s",
+                    marker_selector,
+                    logged_in,
+                )
+                return logged_in
+
+            # Default heuristic: consider the user logged in once the visible
+            # "Sign-in" button disappears from the page.
+            sign_in_buttons = self._driver.find_elements(
+                By.XPATH,
+                LOGIN_SELECTORS["button_xpath"],
+            )
+            visible_buttons = [btn for btn in sign_in_buttons if btn.is_displayed()]
+            logged_in = not visible_buttons
+            self._logger.info(
+                "Login state heuristic: visible_sign_in_buttons=%d, logged_in=%s",
+                len(visible_buttons),
+                logged_in,
+            )
+            return logged_in
+        except Exception:
+            self._logger.exception("Error while checking logged-in state.")
+            return False
+
+    def login(self, username: str, password: str) -> bool:
+        """Attempt to log in using the provided credentials.
+
+        The page is expected to be opened by :meth:`start` beforehand.
+        The method fills the login form and waits for a logged-in state
+        using :meth:`_is_logged_in`.
+        """
+
+        if self._driver is None:
+            self._logger.warning(
+                "SeleniumDriver.login called but driver is not started; "
+                "skipping login attempt.",
+            )
+            return False
+
+        login_timeout = float(self._selenium_cfg.get("login_timeout", DEFAULT_LOGIN_TIMEOUT))
+        result_timeout = float(
+            self._selenium_cfg.get("login_result_timeout", DEFAULT_LOGIN_RESULT_TIMEOUT)
+        )
+
+        self._logger.info(
+            "Starting login attempt for Space Aces user (timeouts: form=%.1fs, result=%.1fs).",
+            login_timeout,
+            result_timeout,
+        )
+
+        try:
+            wait = WebDriverWait(self._driver, login_timeout)
+
+            # Locate the username and password inputs.
+            self._logger.info(
+                "Waiting for username input using selector '%s'.",
+                LOGIN_SELECTORS["username"],
+            )
+            username_field = wait.until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, LOGIN_SELECTORS["username"]),
+                )
+            )
+            self._logger.info("Username input element located for login.")
+
+            self._logger.info(
+                "Waiting for password input using selector '%s'.",
+                LOGIN_SELECTORS["password"],
+            )
+            password_field = wait.until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, LOGIN_SELECTORS["password"]),
+                )
+            )
+            self._logger.info("Password input element located for login.")
+
+            # Locate a submit control for the login form.
+            submit_element: Optional[Any] = None
+            try:
+                submit_element = self._driver.find_element(
+                    By.XPATH,
+                    LOGIN_SELECTORS["button_xpath"],
+                )
+                self._logger.info(
+                    "Login submit button located via XPath '%s'.",
+                    LOGIN_SELECTORS["button_xpath"],
+                )
+            except NoSuchElementException:
+                self._logger.warning(
+                    "Login submit button XPath '%s' not found; "
+                    "falling back to CSS selectors '%s'.",
+                    LOGIN_SELECTORS["button_xpath"],
+                    LOGIN_SELECTORS["submit"],
+                )
+                for candidate in self._driver.find_elements(
+                    By.CSS_SELECTOR,
+                    LOGIN_SELECTORS["submit"],
+                ):
+                    if candidate.is_displayed():
+                        submit_element = candidate
+                        break
+
+            if submit_element is None:
+                self._logger.error("Could not locate login submit button on page.")
+                return False
+
+            # Fill in credentials and submit.
+            self._logger.info("Filling Space Aces login form (username only, password hidden).")
+            username_field.clear()
+            username_field.send_keys(username)
+
+            password_field.clear()
+            password_field.send_keys(password)
+
+            self._logger.info("Submitting Space Aces login form.")
+            submit_element.click()
+
+            # Wait for a change in page state that indicates login success.
+            self._logger.info("Waiting for login result (logged-in state).")
+            try:
+                WebDriverWait(self._driver, result_timeout).until(lambda _d: self._is_logged_in())
+            except TimeoutException:
+                self._logger.warning(
+                    "Timed out waiting for login result after %.1f seconds.",
+                    result_timeout,
+                )
+                return self._is_logged_in()
+
+            is_logged_in = self._is_logged_in()
+            if is_logged_in:
+                self._logger.info("Login appears to be successful based on page state.")
+            else:
+                self._logger.warning("Login appears to have failed based on page state.")
+
+            return is_logged_in
+        except TimeoutException:
+            self._logger.exception(
+                "Timed out while waiting for login form after %.1f seconds.",
+                login_timeout,
+            )
+            return False
+        except Exception:
+            self._logger.exception("Unexpected error while attempting to log in.")
+            return False
 
     def stop(self) -> None:
         """Gracefully stop the Selenium driver and close the browser."""
