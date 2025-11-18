@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Mapping, Optional
 
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -34,6 +41,49 @@ LOGIN_SELECTORS = {
 
 DEFAULT_LOGIN_TIMEOUT = 20.0
 DEFAULT_LOGIN_RESULT_TIMEOUT = 20.0
+
+# Default selector for the main game map element. By default, the first
+# <canvas> element on the page is treated as the map. This can be overridden
+# via the selenium.map_selector configuration option if needed.
+MAP_ELEMENT_SELECTOR = "canvas"
+
+# Dashboard and in-game selectors.
+# Case-insensitive match for PLAY button text on the dashboard.
+PLAY_BUTTON_XPATH = (
+    "//button["
+    "contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'PLAY')"
+    "]"
+)
+GAME_WINDOW_TITLE_CONTAINS = "Space Aces"
+GAME_WINDOW_TITLE_GAME_CONTAINS = "Game"
+# Selector for the Start button in the game window.
+# Currently the game exposes a dedicated button with id="modpack"
+# that controls entering the play view; we treat this as the Start
+# button. If the DOM changes, adjust this selector or move it into
+# configuration.
+GAME_START_BUTTON_XPATH = "//button[@id='modpack']"
+
+# Competition popup selectors.
+COMPETITION_POPUP_XPATH = (
+    "//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), "
+    "'COMPETITION RULES') "
+    "or contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), "
+    "'PILOT! WE HAVE AN IMPORTANT ANNOUNCEMENT TO MAKE!')]"
+)
+COMPETITION_CLOSE_BUTTON_REL_XPATH = (
+    ".//button["
+    "contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'CLOSE')"
+    "]"
+)
+
+# Daily Login Bonus container selector in the game view.
+DAILY_LOGIN_CONTAINER_XPATH = (
+    "//*[contains(translate(normalize-space(), 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), "
+    "'DAILY LOGIN BONUS')]"
+)
+
+# Maximum time to wait for the Daily Login Bonus / START flow.
+START_MAX_WAIT_SECONDS = 40.0
 
 
 class DummyDriver(Driver):
@@ -66,6 +116,7 @@ class SeleniumDriver(Driver):
         self._selenium_cfg: Mapping[str, Any] = config.get("selenium", {}) or {}
         self._logger = logger or logging.getLogger(f"{__name__}.SeleniumDriver")
         self._driver: Optional[webdriver.Chrome] = None
+        self.in_game: bool = False
 
         if not self._selenium_cfg.get("enabled", True):
             self._logger.info("Selenium is disabled in configuration.")
@@ -85,7 +136,10 @@ class SeleniumDriver(Driver):
 
         options = ChromeOptions()
 
-        # Start maximized (primarily for desktop environments).
+        # Start maximized (primarily for desktop environments). We
+        # deliberately avoid incognito/private mode so that session
+        # cookies persist and to reduce the risk of triggering
+        # anti-bot heuristics tied to ephemeral profiles.
         options.add_argument("--start-maximized")
 
         # Optional headless mode.
@@ -134,6 +188,9 @@ class SeleniumDriver(Driver):
 
     def start(self) -> None:
         """Start the Selenium driver and open the game URL."""
+        # Reset in-game flag whenever we (re)start the driver.
+        self.in_game = False
+
         if self._driver is None:
             self._logger.info("Creating Selenium WebDriver instance.")
             self._driver = self._create_driver()
@@ -318,9 +375,536 @@ class SeleniumDriver(Driver):
             self._logger.exception("Unexpected error while attempting to log in.")
             return False
 
+    # ------------------------------------------------------------------
+    # Competition popup helpers
+    # ------------------------------------------------------------------
+    def _close_competition_popup_if_present(self) -> None:
+        """Close the competition popup on the dashboard if it is present.
+
+        The method looks for a popup containing text such as
+        ``COMPETITION RULES`` or ``Pilot! We have an important announcement
+        to make!`` and attempts to click its Close button. All errors are
+        logged but do not propagate further.
+        """
+
+        if self._driver is None:
+            return
+
+        driver = self._driver
+
+        timeout = float(self._selenium_cfg.get("competition_popup_timeout", 25.0))
+        popup_xpath = str(self._selenium_cfg.get("competition_popup_xpath", COMPETITION_POPUP_XPATH))
+        close_rel_xpath = str(
+            self._selenium_cfg.get("competition_close_button_xpath", COMPETITION_CLOSE_BUTTON_REL_XPATH)
+        )
+
+        try:
+            self._logger.debug(
+                "Checking for competition popup using XPath '%s' (timeout=%.1fs).",
+                popup_xpath,
+                timeout,
+            )
+
+            wait = WebDriverWait(driver, timeout)
+            try:
+                popup = wait.until(EC.visibility_of_element_located((By.XPATH, popup_xpath)))
+            except TimeoutException:
+                self._logger.debug(
+                    "No competition popup detected within %.1f seconds.",
+                    timeout,
+                )
+                return
+
+            try:
+                close_button = popup.find_element(By.XPATH, close_rel_xpath)
+            except NoSuchElementException:
+                self._logger.warning(
+                    "Competition popup detected but Close button was not found using relative XPath '%s'. "
+                    "Will search for Close button globally.",
+                    close_rel_xpath,
+                )
+                try:
+                    close_button = driver.find_element(By.XPATH, close_rel_xpath)
+                except NoSuchElementException:
+                    self._logger.warning(
+                        "Competition popup Close button not found; popup will be left open."
+                    )
+                    return
+
+            self._logger.info("Competition popup detected, clicking Close button.")
+            try:
+                close_button.click()
+            except Exception:
+                self._logger.warning(
+                    "Failed to click Close button for competition popup.",
+                    exc_info=True,
+                )
+                return
+
+            try:
+                WebDriverWait(driver, timeout).until(
+                    EC.invisibility_of_element_located((By.XPATH, popup_xpath))
+                )
+                self._logger.info("Competition popup closed.")
+            except TimeoutException:
+                self._logger.warning(
+                    "Competition popup Close clicked but popup did not disappear within %.1f seconds.",
+                    timeout,
+                )
+        except Exception:
+            self._logger.warning(
+                "Unexpected error while handling competition popup; proceeding without closing it.",
+                exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Game entry helpers
+    # ------------------------------------------------------------------
+    def _wait_and_click_start_button(self) -> bool:
+        """Wait for the Daily Login Bonus / START button and click it.
+
+        The method assumes we are already in the ``Space aces | Game`` window.
+        It periodically checks the Daily Login Bonus container and the START
+        button, attempting a click whenever the button appears interactable,
+        and stops once the container disappears or the timeout expires.
+        """
+
+        if self._driver is None:
+            self._logger.warning(
+                "SeleniumDriver._wait_and_click_start_button called but driver is not started; "
+                "skipping start button workflow.",
+            )
+            return False
+
+        driver = self._driver
+
+        start_xpath = str(self._selenium_cfg.get("start_button_xpath", GAME_START_BUTTON_XPATH)).strip()
+        daily_login_xpath = str(
+            self._selenium_cfg.get("daily_login_container_xpath", DAILY_LOGIN_CONTAINER_XPATH)
+        ).strip()
+
+        if not daily_login_xpath:
+            self._logger.warning(
+                "Game: daily login container XPath is empty; START workflow may be unreliable."
+            )
+
+        self._logger.info("Game: waiting for Daily Login Bonus / START button.")
+
+        end_time = time.time() + START_MAX_WAIT_SECONDS
+        while time.time() < end_time:
+            # 1) Check if the Daily Login Bonus container is still visible.
+            try:
+                if daily_login_xpath:
+                    container = driver.find_element(By.XPATH, daily_login_xpath)
+                    if not container.is_displayed():
+                        self._logger.info("Game: Daily Login Bonus container hidden - in game.")
+                        return True
+                else:
+                    # If we do not have a container selector, fall back to checking the map.
+                    map_element = self._find_map_element()
+                    if map_element is not None:
+                        self._logger.info(
+                            "Game: no daily login container XPath configured, but map is present; "
+                            "assuming in-game view."
+                        )
+                        return True
+            except NoSuchElementException:
+                self._logger.info(
+                    "Game: Daily Login Bonus container not found - in game."
+                )
+                return True
+            except StaleElementReferenceException:
+                self._logger.info(
+                    "Game: Daily Login Bonus container reference became stale, will re-check.",
+                )
+            except Exception:
+                self._logger.warning(
+                    "Game: unexpected error while checking Daily Login Bonus container, will retry.",
+                    exc_info=False,
+                )
+
+            # 2) Try to locate and click the START/Loading button.
+            try:
+                btn = driver.find_element(By.XPATH, start_xpath)
+                self._logger.debug("Game: DOM START button present, trying JS click.")
+                driver.execute_script("arguments[0].click();", btn)
+            except (NoSuchElementException, StaleElementReferenceException) as e:
+                self._logger.debug(
+                    "Game: DOM START button not ready yet (%s), will try fallback.",
+                    e.__class__.__name__,
+                )
+            except Exception:
+                self._logger.warning(
+                    "Game: unexpected error while interacting with DOM START button, will retry.",
+                    exc_info=False,
+                )
+
+            # 3) Additional fallback: click a rough START area by viewport coordinates.
+            self._fallback_click_start_area()
+
+            time.sleep(0.8)
+
+        self._logger.warning(
+            "Game: failed to dismiss Daily Login Bonus / START within %.1f seconds.",
+            START_MAX_WAIT_SECONDS,
+        )
+        return False
+
+    def _fallback_click_start_area(self) -> None:
+        """Грубый клик в зону, где визуально находится зелёная кнопка START.
+
+        This helper approximates the START area using viewport dimensions,
+        clicking near the bottom-centre of the window. It is intentionally
+        best-effort and must never raise exceptions to callers.
+        """
+
+        if self._driver is None:
+            self._logger.warning(
+                "SeleniumDriver._fallback_click_start_area called but driver is not started; "
+                "skipping fallback click.",
+            )
+            return
+
+        driver = self._driver
+
+        try:
+            width = float(
+                driver.execute_script(
+                    "return window.innerWidth || document.documentElement.clientWidth || document.body.clientWidth;"
+                )
+                or 0.0
+            )
+            height = float(
+                driver.execute_script(
+                    "return window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight;"
+                )
+                or 0.0
+            )
+
+            if width <= 0.0 or height <= 0.0:
+                self._logger.warning(
+                    "Game: fallback START click aborted due to invalid viewport size "
+                    "(width=%.1f, height=%.1f).",
+                    width,
+                    height,
+                )
+                return
+
+            # Target a point near the bottom-centre of the viewport.
+            click_x = width * 0.5
+            click_y = height * 0.9
+
+            # Offsets are relative to the element centre when using
+            # move_to_element_with_offset.
+            offset_x = click_x - (width / 2.0)
+            offset_y = click_y - (height / 2.0)
+
+            body = driver.find_element(By.TAG_NAME, "body")
+
+            self._logger.info(
+                "Game: fallback click into START area at viewport (%.1f, %.1f) offsets=(%.1f, %.1f).",
+                click_x,
+                click_y,
+                offset_x,
+                offset_y,
+            )
+
+            actions = ActionChains(driver)
+            actions.move_to_element_with_offset(body, offset_x, offset_y).click().perform()
+        except Exception:
+            self._logger.warning(
+                "Game: fallback click into START area failed; ignoring and continuing.",
+                exc_info=False,
+            )
+
+    def enter_game(self) -> bool:
+        """Enter the in-game view from the Space Aces dashboard.
+
+        This method assumes that the user is already logged in and the
+        current page is the Space Aces dashboard. It will attempt to:
+
+        1. Click the PLAY button on the dashboard.
+        2. Switch to the game window/tab (title contains ``Space Aces`` and ``Game``).
+        3. Wait for the ``Start`` button to become available and click it.
+
+        On success, :attr:`in_game` is set to ``True`` and the method
+        returns ``True``. On failure, it logs the problem and returns
+        ``False`` without raising exceptions.
+        """
+
+        # Ensure we start from a consistent state; only set to True on success.
+        self.in_game = False
+
+        if self._driver is None:
+            self._logger.warning(
+                "SeleniumDriver.enter_game called but driver is not started; "
+                "skipping game entry.",
+            )
+            return False
+
+        driver = self._driver
+
+        enter_timeout = float(self._selenium_cfg.get("enter_game_timeout", 30.0))
+        self._logger.info(
+            "Starting enter_game sequence (timeout=%.1fs).",
+            enter_timeout,
+        )
+
+        try:
+            wait = WebDriverWait(driver, enter_timeout)
+
+            # Close competition popup if it is present on the dashboard.
+            self._close_competition_popup_if_present()
+
+            # 1) Click PLAY on the dashboard.
+            play_xpath = str(self._selenium_cfg.get("play_button_xpath", PLAY_BUTTON_XPATH))
+            self._logger.info(
+                "Waiting for PLAY button using XPath '%s'.",
+                play_xpath,
+            )
+
+            original_handles = list(driver.window_handles)
+
+            try:
+                play_button = wait.until(
+                    EC.element_to_be_clickable((By.XPATH, play_xpath)),
+                )
+            except TimeoutException:
+                self._logger.error(
+                    "PLAY button was not found or not clickable within %.1f seconds "
+                    "using XPath '%s'.",
+                    enter_timeout,
+                    play_xpath,
+                )
+                return False
+
+            self._logger.info("Dashboard: PLAY clicked.")
+            try:
+                play_button.click()
+            except ElementClickInterceptedException:
+                self._logger.warning(
+                    "PLAY button click was intercepted, likely by an overlay; "
+                    "waiting for overlays to disappear before retrying."
+                )
+                try:
+                    WebDriverWait(driver, enter_timeout).until(
+                        EC.invisibility_of_element_located((By.CSS_SELECTOR, ".v-overlay__scrim"))
+                    )
+                    self._logger.info("Retrying click on PLAY button after overlay disappearance.")
+                    play_button.click()
+                except Exception:
+                    self._logger.exception(
+                        "Failed to click PLAY button even after waiting for overlays."
+                    )
+                    return False
+
+            # 2) Wait for a new window/tab and switch to the game window.
+            self._logger.info("Waiting for game window/tab to appear.")
+
+            try:
+                WebDriverWait(driver, enter_timeout).until(
+                    lambda d: len(d.window_handles) > len(original_handles)
+                )
+            except TimeoutException:
+                self._logger.warning(
+                    "No new window handle appeared after clicking PLAY within %.1f seconds; "
+                    "will search for game window among existing handles.",
+                    enter_timeout,
+                )
+
+            game_handle = None
+            handles = driver.window_handles
+
+            title_contains = str(
+                self._selenium_cfg.get("game_window_title_contains", GAME_WINDOW_TITLE_CONTAINS)
+            )
+            title_game_contains = str(
+                self._selenium_cfg.get(
+                    "game_window_title_game_contains",
+                    GAME_WINDOW_TITLE_GAME_CONTAINS,
+                )
+            )
+
+            for handle in handles:
+                driver.switch_to.window(handle)
+                title = driver.title or ""
+                title_lower = title.lower()
+                if title_contains.lower() in title_lower and title_game_contains.lower() in title_lower:
+                    game_handle = handle
+                    self._logger.info(
+                        "Found game window handle=%s with title=%r.",
+                        handle,
+                        title,
+                    )
+                    break
+
+            if game_handle is None:
+                self._logger.error(
+                    "Could not locate game window with title containing %r and %r "
+                    "(case-insensitive). Available titles: %s",
+                    title_contains,
+                    title_game_contains,
+                    [driver.switch_to.window(h) or driver.title for h in handles],
+                )
+                return False
+
+            driver.switch_to.window(game_handle)
+            self._logger.info("Switched to Space aces  Game window (title=%r).", driver.title)
+
+            # 3) Wait for the Start button and click it using the helper.
+            start_ok = self._wait_and_click_start_button()
+            if start_ok:
+                self.in_game = True
+                self._logger.info(
+                    "Game: Daily Login Bonus dismissed, in_game=True."
+                )
+                return True
+
+            self._logger.info("Game: failed to dismiss Daily Login Bonus / START.")
+            return False
+        except Exception:
+            self._logger.exception("Unexpected error during enter_game sequence.")
+
+            # Fallback: if the main map element is already present, assume that
+            # the game view is ready even though the explicit Start flow did
+            # not complete successfully. This can happen when the loader or
+            # mod UI changes the expected DOM structure.
+            try:
+                map_element = self._find_map_element()
+            except Exception:
+                return False
+
+            if map_element is not None:
+                self.in_game = True
+                self._logger.warning(
+                    "enter_game encountered an error, but map element is present; "
+                    "assuming game view is ready (in_game=True)."
+                )
+                return True
+
+            return False
+    # ------------------------------------------------------------------
+    # Map helpers
+    # ------------------------------------------------------------------
+    def _find_map_element(self):
+        """Locate the primary game map element in the DOM.
+
+        The selector is configurable via ``selenium.map_selector`` and
+        defaults to :data:`MAP_ELEMENT_SELECTOR` (currently the first
+        ``<canvas>`` element on the page).
+        """
+
+        if self._driver is None:
+            self._logger.warning(
+                "SeleniumDriver._find_map_element called but driver is not started; "
+                "skipping map lookup.",
+            )
+            return None
+
+        selector = str(self._selenium_cfg.get("map_selector", MAP_ELEMENT_SELECTOR)).strip()
+        if not selector:
+            self._logger.error(
+                "Map selector is empty; cannot locate map element. "
+                "Check selenium.map_selector configuration.",
+            )
+            return None
+
+        self._logger.info("Locating map element using selector '%s'.", selector)
+
+        try:
+            element = self._driver.find_element(By.CSS_SELECTOR, selector)
+            self._logger.info("Map element located successfully.")
+            return element
+        except NoSuchElementException:
+            self._logger.error(
+                "Could not locate map element using selector '%s'.",
+                selector,
+            )
+            return None
+        except Exception:
+            self._logger.exception("Unexpected error while locating map element.")
+            return None
+
+    def _click_on_map_relative(self, rel_x: float, rel_y: float) -> None:
+        """Click on the game map using normalised coordinates.
+
+        *rel_x* and *rel_y* must be within ``[0.0, 1.0]`` and represent
+        the position on the map relative to its size, where (0.5, 0.5)
+        is the centre.
+        """
+
+        if self._driver is None:
+            self._logger.warning(
+                "SeleniumDriver._click_on_map_relative called but driver is not started; "
+                "skipping click.",
+            )
+            return
+
+        try:
+            if not (0.0 <= rel_x <= 1.0 and 0.0 <= rel_y <= 1.0):
+                self._logger.warning(
+                    "Normalised map coordinates out of range: rel_x=%.3f rel_y=%.3f; "
+                    "expected values between 0.0 and 1.0. Click will be skipped.",
+                    rel_x,
+                    rel_y,
+                )
+                return
+
+            map_element = self._find_map_element()
+            if map_element is None:
+                self._logger.error(
+                    "Cannot click on map because the map element could not be located.",
+                )
+                return
+
+            size = map_element.size or {}
+            location = map_element.location or {}
+
+            width = float(size.get("width") or 0.0)
+            height = float(size.get("height") or 0.0)
+            if width <= 0.0 or height <= 0.0:
+                self._logger.warning(
+                    "Map element has non-positive size: width=%s height=%s; click will be skipped.",
+                    width,
+                    height,
+                )
+                return
+
+            left = float(location.get("x") or 0.0)
+            top = float(location.get("y") or 0.0)
+
+            abs_x = left + width * rel_x
+            abs_y = top + height * rel_y
+
+            # ActionChains offsets are relative to the element's centre when
+            # using move_to_element_with_offset. Compute offsets accordingly.
+            offset_x = width * rel_x - (width / 2.0)
+            offset_y = height * rel_y - (height / 2.0)
+
+            self._logger.info(
+                "Clicking on map at rel=(%.3f, %.3f) abs=(%.1f, %.1f) offset=(%.1f, %.1f).",
+                rel_x,
+                rel_y,
+                abs_x,
+                abs_y,
+                offset_x,
+                offset_y,
+            )
+
+            actions = ActionChains(self._driver)
+            actions.move_to_element_with_offset(map_element, offset_x, offset_y).click().perform()
+        except Exception:
+            self._logger.exception(
+                "Unexpected error while clicking on map at rel=(%s, %s).",
+                rel_x,
+                rel_y,
+            )
+
     def stop(self) -> None:
         """Gracefully stop the Selenium driver and close the browser."""
         if self._driver is None:
+            # Ensure flag is reset even if the driver was already None.
+            self.in_game = False
             return
 
         self._logger.info("Stopping Selenium WebDriver.")
@@ -331,6 +915,7 @@ class SeleniumDriver(Driver):
             self._logger.exception("Error while quitting Selenium WebDriver.")
         finally:
             self._driver = None
+            self.in_game = False
 
     # ------------------------------------------------------------------
     # Driver interface implementation
@@ -338,9 +923,9 @@ class SeleniumDriver(Driver):
     def execute(self, action: BotAction, state: GameState) -> None:
         """Execute a high-level action using Selenium.
 
-        For now, this method only logs what would be done. Actual DOM
-        interaction (locating elements, sending keys, etc.) will be
-        added in a later implementation phase.
+        For now, most actions are only logged. Basic movement support
+        is provided for MOVE actions that include normalised map
+        coordinates in ``action.meta``.
         """
 
         if self._driver is None:
@@ -360,22 +945,61 @@ class SeleniumDriver(Driver):
             state.tick_counter,
         )
 
+        # Block game-related actions until we have successfully entered the game.
+        if action.type in {
+            ActionType.MOVE,
+            ActionType.ATTACK,
+            ActionType.COLLECT,
+            ActionType.JUMP,
+            ActionType.REPAIR,
+            ActionType.ESCAPE,
+        } and not self.in_game:
+            self._logger.warning(
+                "SeleniumDriver: skipping %s action because bot is not in-game yet "
+                "(in_game=False).",
+                action.type.name,
+            )
+            return
+
         if action.type is ActionType.IDLE:
             self._logger.info("SeleniumDriver: IDLE action, nothing to perform.")
             return
 
         if action.type is ActionType.MOVE:
-            pos = action.position
-            self._logger.info(
-                "SeleniumDriver: MOVE action towards map position (%s, %s). "
-                "This would trigger a click in the game client.",
-                getattr(pos, "x", None),
-                getattr(pos, "y", None),
-            )
-            # TODO: Convert logical map coordinates to browser window
-            # coordinates and perform a real click, e.g. via:
-            #   from selenium.webdriver import ActionChains
-            #   ActionChains(self._driver).move_by_offset(x, y).click().perform()
+            rel_x = None
+            rel_y = None
+            meta = action.meta or {}
+
+            if isinstance(meta, dict):
+                rel_x = meta.get("rel_x")
+                rel_y = meta.get("rel_y")
+
+            if isinstance(rel_x, (int, float)) and isinstance(rel_y, (int, float)):
+                self._logger.info(
+                    "SeleniumDriver: MOVE action using normalised map coordinates "
+                    "rel_x=%.3f rel_y=%.3f.",
+                    float(rel_x),
+                    float(rel_y),
+                )
+                try:
+                    self._click_on_map_relative(float(rel_x), float(rel_y))
+                except Exception:
+                    # The helper already logs details, but we keep this as a guard.
+                    self._logger.exception(
+                        "Error while performing MOVE click on map for rel=(%s, %s).",
+                        rel_x,
+                        rel_y,
+                    )
+            else:
+                pos = action.position
+                self._logger.warning(
+                    "SeleniumDriver: MOVE action received without normalised map "
+                    "coordinates in meta (expected 'rel_x' and 'rel_y'); "
+                    "action will be logged only. position=(%s, %s)",
+                    getattr(pos, "x", None),
+                    getattr(pos, "y", None),
+                )
+
             return
 
         # Other actions are acknowledged but not yet implemented.

@@ -108,6 +108,8 @@ def main() -> None:
             except Exception:
                 logger.exception("Error while starting driver: %s", driver_name)
 
+        login_performed = False
+
         if hasattr(driver, "login"):
             # Credentials are expected to come from config, which may be
             # populated from .env via python-dotenv.
@@ -125,6 +127,7 @@ def main() -> None:
 
             try:
                 login_ok = driver.login(username, password)  # type: ignore[call-arg]
+                login_performed = True
             except Exception:
                 # SeleniumDriver.login should already log the traceback;
                 # this handler is only a final safeguard.
@@ -143,6 +146,35 @@ def main() -> None:
         else:
             logger.info(
                 "Driver %s does not support login(); starting without explicit login step.",
+                driver_name,
+            )
+
+        # After a successful login, attempt to enter the in-game view.
+        if hasattr(driver, "enter_game"):
+            if login_performed:
+                logger.info("Attempting to enter Space Aces game view...")
+
+                try:
+                    enter_ok = driver.enter_game()  # type: ignore[call-arg]
+                except Exception:
+                    logger.exception("Unexpected error while attempting to enter the game.")
+                    logger.info("enter_game failed, stopping bot.")
+                    return
+
+                if enter_ok:
+                    logger.info("enter_game successful, starting main loop.")
+                else:
+                    logger.info("enter_game failed, stopping bot.")
+                    return
+            else:
+                logger.info(
+                    "Driver %s supports enter_game() but login was not performed; "
+                    "skipping enter_game step.",
+                    driver_name,
+                )
+        else:
+            logger.info(
+                "Driver %s does not support enter_game(); starting without explicit game entry step.",
                 driver_name,
             )
 
