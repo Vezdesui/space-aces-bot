@@ -19,7 +19,7 @@
     "anti_detect": true
   },
   "farm": {
-    "collect_boxes": false,
+    "collect_boxes": true,
     "hunt_npcs": true
   },
   "combat": {
@@ -32,5 +32,18 @@
   "runtime": {
     "max_ticks": 1000,
     "max_seconds": 90
+  },
+  "vision": {
+    "enabled": true,
+    "screenshot_method": "desktop",
+    "capture_region": {
+      "left": 0,
+      "top": 0,
+      "width": 1920,
+      "height": 1080
+    },
+    "templates_path": "assets/templates/",
+    "min_match_score": 0.8,
+    "max_detections_per_type": 10
   }
 }

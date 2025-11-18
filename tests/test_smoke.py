@@ -4,6 +4,7 @@ from space_aces_bot.core.actions import ActionType, BotAction
 from space_aces_bot.core.game_state import GameState, Position, Ship
 from space_aces_bot.modules.combat import BasicCombat
 from space_aces_bot.modules.farm import BasicFarm
+from space_aces_bot.modules.vision import TemplateVision
 
 
 def test_can_import_space_aces_bot() -> None:
@@ -40,6 +41,8 @@ def test_can_import_basic_farm_and_combat() -> None:
     # Construction should not raise and should accept minimal configs.
     farm = BasicFarm(farm_cfg={}, combat_cfg={})
     combat = BasicCombat(combat_cfg={})
+    vision = TemplateVision(vision_cfg={})
 
     assert farm is not None
     assert combat is not None
+    assert vision is not None

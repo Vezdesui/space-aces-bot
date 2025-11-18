@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Optional, Sequence
 
-from space_aces_bot.core.actions import BotAction
-from space_aces_bot.core.game_state import GameState, Npc
+from space_aces_bot.core.actions import ActionType, BotAction
+from space_aces_bot.core.game_state import GameState, Npc, Resource, Ship
 from space_aces_bot.core.interfaces import Farm
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ class BasicFarm(Farm):
         cfg: Mapping[str, Any] = farm_cfg or {}
         combat_cfg = combat_cfg or {}
 
+        self._collect_boxes: bool = bool(cfg.get("collect_boxes", False))
         self._hunt_npcs: bool = bool(cfg.get("hunt_npcs", True))
 
         npc_priority_raw: Any = combat_cfg.get("npc_priority", ())
@@ -62,6 +63,21 @@ class BasicFarm(Farm):
 
         self._npc_priority = list(priorities)
         self._logger = logger or logging.getLogger(__name__)
+
+    @staticmethod
+    def _distance(ship: Ship, resource: Resource) -> float:
+        dx = ship.position.x - resource.position.x
+        dy = ship.position.y - resource.position.y
+        return (dx * dx + dy * dy) ** 0.5
+
+    def _select_nearest_resource(self, state: GameState) -> Optional[Resource]:
+        if not state.resources:
+            return None
+
+        ship = state.ship
+        resources = list(state.resources.values())
+        resources.sort(key=lambda res: self._distance(ship, res))
+        return resources[0]
 
     def _select_target(self, state: GameState) -> Optional[Npc]:
         """Select an NPC target according to the configured priority."""
@@ -86,11 +102,35 @@ class BasicFarm(Farm):
         return npcs[0]
 
     def decide(self, state: GameState) -> BotAction | None:
-        """Choose which NPC to farm and mark it as the current combat target."""
+        """Decide on farming behaviour: collect boxes first, then hunt NPCs."""
 
         log = self._logger
 
-        # If NPC hunting is disabled, do nothing.
+        # 1. Try to collect resource boxes if enabled.
+        if self._collect_boxes and state.resources:
+            resource = self._select_nearest_resource(state)
+            if resource is not None:
+                rel_x = resource.position.x
+                rel_y = resource.position.y
+                log.info(
+                    "BasicFarm: moving to resource %s kind=%s at rel=(%.3f, %.3f)",
+                    resource.id,
+                    getattr(resource, "kind", "unknown"),
+                    rel_x,
+                    rel_y,
+                )
+                return BotAction(
+                    type=ActionType.MOVE,
+                    position=None,
+                    meta={
+                        "rel_x": rel_x,
+                        "rel_y": rel_y,
+                        "target_resource_id": resource.id,
+                        "target_resource_kind": getattr(resource, "kind", "unknown"),
+                    },
+                )
+
+        # 2. If no boxes or collection disabled, fall back to NPC hunting.
         if not self._hunt_npcs:
             return None
 

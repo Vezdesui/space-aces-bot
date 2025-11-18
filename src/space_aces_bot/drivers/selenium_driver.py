@@ -963,14 +963,34 @@ class SeleniumDriver(Driver):
                 rel_y = meta.get("rel_y")
 
             if isinstance(rel_x, (int, float)) and isinstance(rel_y, (int, float)):
-                self._logger.info(
-                    "SeleniumDriver: %s using normalised map coordinates rel_x=%.3f rel_y=%.3f.",
-                    action.type.name,
-                    float(rel_x),
-                    float(rel_y),
-                )
+                rel_x_f = float(rel_x)
+                rel_y_f = float(rel_y)
+
+                resource_id = None
+                resource_kind = None
+                if isinstance(meta, dict):
+                    resource_id = meta.get("target_resource_id")
+                    resource_kind = meta.get("target_resource_kind")
+
+                if resource_id is not None and resource_kind is not None:
+                    self._logger.info(
+                        "SeleniumDriver: %s to resource id=%s kind=%s rel=(%.3f, %.3f).",
+                        action.type.name,
+                        resource_id,
+                        resource_kind,
+                        rel_x_f,
+                        rel_y_f,
+                    )
+                else:
+                    self._logger.info(
+                        "SeleniumDriver: %s using normalised map coordinates rel_x=%.3f rel_y=%.3f.",
+                        action.type.name,
+                        rel_x_f,
+                        rel_y_f,
+                    )
+
                 try:
-                    self._click_on_map_relative(float(rel_x), float(rel_y))
+                    self._click_on_map_relative(rel_x_f, rel_y_f)
                 except Exception:
                     self._logger.exception(
                         "Error while clicking on map for %s at rel=(%s, %s).",

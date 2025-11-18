@@ -31,9 +31,9 @@ class Npc:
 
     id: str
     position: Position
-    npc_type: str
     hp: int
     max_hp: int
+    npc_type: str = "unknown"
 
 
 @dataclass
@@ -44,6 +44,7 @@ class Resource:
     position: Position
     resource_type: str
     value: int
+    kind: str = "unknown"
 
 
 @dataclass
@@ -110,6 +111,11 @@ class GameState:
 
         self.ticks_with_current_target += 1
         self._last_target_id = current_id
+
+    def clear_vision_objects(self) -> None:
+        """Clear dynamic objects populated by the vision system."""
+
+        self.resources.clear()
 
     def __repr__(self) -> str:
         return (
