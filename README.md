@@ -24,6 +24,20 @@
 
 Используйте скрипт:
 
+## Credentials / учетные данные
+
+- Логин и пароль не должны попадать в репозиторий.
+- Для этого используется файл `.env`, который игнорируется `git` (строка уже добавлена в `.gitignore`).
+- Пример содержимого `.env`:
+
+  ```env
+  SPACE_ACES_USERNAME=YOUR_USERNAME
+  SPACE_ACES_PASSWORD=YOUR_PASSWORD
+  ```
+
+- Для ориентира есть файл `.env.example` в корне проекта: его можно скопировать в `.env` и заполнить реальными значениями.
+- `configs\config.example.json` содержит только пример логина/пароля, а реальные значения берутся из `.env` через `python-dotenv` (переменные `SPACE_ACES_USERNAME` и `SPACE_ACES_PASSWORD`).
+
 ```cmd
 scripts\run_bot.cmd
 ```
@@ -33,4 +47,3 @@ scripts\run_bot.cmd
 ```cmd
 scripts\run_bot.cmd --some-arg value
 ```
-

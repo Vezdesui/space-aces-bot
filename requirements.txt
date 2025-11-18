@@ -1,3 +1,4 @@
 colorlog==6.8.2
 pytest==8.3.3
-
+selenium
+python-dotenv

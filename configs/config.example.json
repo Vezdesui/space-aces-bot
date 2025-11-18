@@ -1,6 +1,6 @@
 {
-  "username": "Vezdesui",
-  "password": "21011990Aa",
+  "username": "YOUR_USERNAME",
+  "password": "YOUR_PASSWORD",
   "server_url": "https://space-aces.com/",
   "mode": "farm",
   "bot_settings": {
@@ -9,6 +9,13 @@
     "attack_players": false,
     "auto_repair": true,
     "max_runtime_minutes": 60
+  },
+  "selenium": {
+    "enabled": true,
+    "browser": "chrome",
+    "driver_path": "CHANGE_ME",
+    "game_url": "https://space-aces.com/home",
+    "headless": false,
+    "anti_detect": true
   }
 }
-

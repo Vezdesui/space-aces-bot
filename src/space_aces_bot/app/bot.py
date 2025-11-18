@@ -95,43 +95,65 @@ def main() -> None:
     safety = modules["safety"]
     driver = modules["driver"]
 
-    logger.info("[space_aces_bot] starting main loop")
+    driver_name = type(driver).__name__
+    logger.info(
+        "[space_aces_bot] starting main loop with driver=%s",
+        driver_name,
+    )
+
+    # Start the driver once before entering the main loop, if supported.
+    if hasattr(driver, "start"):
+        try:
+            logger.info("Starting driver: %s", driver_name)
+            driver.start()  # type: ignore[call-arg]
+        except Exception:
+            logger.exception("Error while starting driver: %s", driver_name)
 
     max_ticks = 20
-    for _ in range(max_ticks):
-        logger.info("Main loop tick %s", state.tick_counter)
+    try:
+        for _ in range(max_ticks):
+            logger.info("Main loop tick %s", state.tick_counter)
 
-        # Update game state based on what we see.
-        vision.update_state(state)
+            # Update game state based on what we see.
+            vision.update_state(state)
 
-        # First, let safety decide if we need to escape or repair.
-        danger_action = safety.decide(state)
-        if danger_action is not None:
-            logger.info("Safety produced action: %s", danger_action)
-            driver.execute(danger_action, state)
+            # First, let safety decide if we need to escape or repair.
+            danger_action = safety.decide(state)
+            if danger_action is not None:
+                logger.info("Safety produced action: %s", danger_action)
+                driver.execute(danger_action, state)
+                state.tick_counter += 1
+                time.sleep(0.3)
+                continue
+
+            # If it's safe, try to farm or fight.
+            farm_action = farm.decide(state)
+            primary_action = farm_action
+
+            if primary_action is None:
+                primary_action = combat.decide(state)
+
+            if primary_action is not None:
+                logger.info("Primary module produced action: %s", primary_action)
+                driver.execute(primary_action, state)
+
+            # Let navigation propose a move if needed.
+            nav_action = navigation.tick(state)
+            if nav_action is not None:
+                logger.info("Navigation produced action: %s", nav_action)
+                driver.execute(nav_action, state)
+
+            # Tick bookkeeping and small delay between iterations.
             state.tick_counter += 1
             time.sleep(0.3)
-            continue
 
-        # If it's safe, try to farm or fight.
-        farm_action = farm.decide(state)
-        primary_action = farm_action
-
-        if primary_action is None:
-            primary_action = combat.decide(state)
-
-        if primary_action is not None:
-            logger.info("Primary module produced action: %s", primary_action)
-            driver.execute(primary_action, state)
-
-        # Let navigation propose a move if needed.
-        nav_action = navigation.tick(state)
-        if nav_action is not None:
-            logger.info("Navigation produced action: %s", nav_action)
-            driver.execute(nav_action, state)
-
-        # Tick bookkeeping and small delay between iterations.
-        state.tick_counter += 1
-        time.sleep(0.3)
-
-    logger.info("[space_aces_bot] stopping main loop")
+        logger.info("[space_aces_bot] stopping main loop")
+    finally:
+        # Ensure the driver is properly stopped even if an error occurs.
+        if hasattr(driver, "stop"):
+            try:
+                logger.info("Stopping driver: %s", driver_name)
+                driver.stop()  # type: ignore[call-arg]
+                logger.info("[space_aces_bot] driver stopped")
+            except Exception:
+                logger.exception("Error while stopping driver: %s", driver_name)

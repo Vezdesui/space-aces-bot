@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Mapping
 
-from space_aces_bot.drivers.selenium_driver import DummyDriver
+from space_aces_bot.drivers.selenium_driver import DummyDriver, SeleniumDriver
 from space_aces_bot.modules.combat import DummyCombat
 from space_aces_bot.modules.farm import DummyFarm
 from space_aces_bot.modules.navigation import SimpleNavigation
@@ -20,12 +20,21 @@ def create_default_modules(config: Mapping[str, Any] | None) -> Dict[str, Any]:
     combat, farming, safety and the low-level driver.
     """
 
+    cfg: Mapping[str, Any] = config or {}
+    selenium_cfg = cfg.get("selenium", {}) or {}
+
     navigation = SimpleNavigation()
     vision = DummyVision()
     combat = DummyCombat()
     farm = DummyFarm()
     safety = DummySafety()
-    driver = DummyDriver()
+
+    if selenium_cfg.get("enabled", True):
+        driver = SeleniumDriver(cfg)
+        driver_name = "SeleniumDriver"
+    else:
+        driver = DummyDriver()
+        driver_name = "DummyDriver"
 
     modules: Dict[str, Any] = {
         "navigation": navigation,
@@ -36,6 +45,9 @@ def create_default_modules(config: Mapping[str, Any] | None) -> Dict[str, Any]:
         "driver": driver,
     }
 
-    logger.info("Created default modules: %s", ", ".join(modules.keys()))
+    logger.info(
+        "Created default modules: %s (driver=%s)",
+        ", ".join(sorted(modules.keys())),
+        driver_name,
+    )
     return modules
-
