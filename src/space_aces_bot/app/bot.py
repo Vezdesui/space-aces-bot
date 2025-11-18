@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
+from typing import Any, Mapping
 
+from space_aces_bot.app.factory import create_default_modules
 from space_aces_bot.core.config import load_config
-from space_aces_bot.core.game_state import GameState
+from space_aces_bot.core.game_state import GameState, Position, Ship
 
 
 def _find_config_file() -> Path:
@@ -27,20 +30,108 @@ def _find_config_file() -> Path:
     )
 
 
+def _setup_logging() -> None:
+    """Configure root logger with optional color support."""
+    root_logger = logging.getLogger()
+
+    # Avoid reconfiguring logging if it's already set up.
+    if root_logger.handlers:
+        return
+
+    root_logger.setLevel(logging.INFO)
+
+    try:
+        from colorlog import ColoredFormatter  # type: ignore[import]
+
+        handler = logging.StreamHandler()
+        formatter = ColoredFormatter(
+            "%(log_color)s[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+            log_colors={
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+        )
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+    except Exception:  # pragma: no cover - fallback is straightforward
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
+
 def main() -> None:
     """Entry point for the space_aces_bot application."""
+    _setup_logging()
+    logger = logging.getLogger(__name__)
+
     config_path = _find_config_file()
-    # Load configuration to ensure it's valid and available to the application.
-    _config = load_config(config_path)
+    config: Mapping[str, Any] = load_config(config_path)
 
-    game_state = GameState()
+    # Create an initial, minimal game state for the bot.
+    ship = Ship(
+        id="player-1",
+        position=Position(x=0.0, y=0.0),
+        hp=100,
+        max_hp=100,
+        shield=50,
+        max_shield=50,
+        speed=1.0,
+    )
 
-    print("[space_aces_bot] skeleton running")
+    state = GameState(ship=ship, current_map="1-1")
 
-    for tick in range(1, 4):
-        game_state.tick_counter = tick
-        print(f"[space_aces_bot] tick {tick}: {game_state}")
-        time.sleep(0.5)
+    modules = create_default_modules(config)
+    navigation = modules["navigation"]
+    vision = modules["vision"]
+    combat = modules["combat"]
+    farm = modules["farm"]
+    safety = modules["safety"]
+    driver = modules["driver"]
 
-    print("[space_aces_bot] finished.")
+    logger.info("[space_aces_bot] starting main loop")
 
+    max_ticks = 20
+    for _ in range(max_ticks):
+        logger.info("Main loop tick %s", state.tick_counter)
+
+        # Update game state based on what we see.
+        vision.update_state(state)
+
+        # First, let safety decide if we need to escape or repair.
+        danger_action = safety.decide(state)
+        if danger_action is not None:
+            logger.info("Safety produced action: %s", danger_action)
+            driver.execute(danger_action, state)
+            state.tick_counter += 1
+            time.sleep(0.3)
+            continue
+
+        # If it's safe, try to farm or fight.
+        farm_action = farm.decide(state)
+        primary_action = farm_action
+
+        if primary_action is None:
+            primary_action = combat.decide(state)
+
+        if primary_action is not None:
+            logger.info("Primary module produced action: %s", primary_action)
+            driver.execute(primary_action, state)
+
+        # Let navigation propose a move if needed.
+        nav_action = navigation.tick(state)
+        if nav_action is not None:
+            logger.info("Navigation produced action: %s", nav_action)
+            driver.execute(nav_action, state)
+
+        # Tick bookkeeping and small delay between iterations.
+        state.tick_counter += 1
+        time.sleep(0.3)
+
+    logger.info("[space_aces_bot] stopping main loop")
