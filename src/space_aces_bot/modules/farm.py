@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, Mapping, Optional, Sequence
 
 from space_aces_bot.core.actions import BotAction
-from space_aces_bot.core.game_state import GameState
+from space_aces_bot.core.game_state import GameState, Npc
 from space_aces_bot.core.interfaces import Farm
 
 logger = logging.getLogger(__name__)
@@ -32,4 +33,83 @@ class DummyFarm(Farm):
             )
 
         # No farming action yet; navigation patrol defines movement.
+        return None
+
+
+class BasicFarm(Farm):
+    """Basic farming strategy that selects NPC targets for combat."""
+
+    def __init__(
+        self,
+        farm_cfg: Mapping[str, Any] | None = None,
+        combat_cfg: Mapping[str, Any] | None = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        cfg: Mapping[str, Any] = farm_cfg or {}
+        combat_cfg = combat_cfg or {}
+
+        self._hunt_npcs: bool = bool(cfg.get("hunt_npcs", True))
+
+        npc_priority_raw: Any = combat_cfg.get("npc_priority", ())
+        if isinstance(npc_priority_raw, str):
+            priorities: Sequence[str] = [
+                part.strip() for part in npc_priority_raw.split(",") if part.strip()
+            ]
+        elif isinstance(npc_priority_raw, Sequence):
+            priorities = [str(p) for p in npc_priority_raw]
+        else:
+            priorities = []
+
+        self._npc_priority = list(priorities)
+        self._logger = logger or logging.getLogger(__name__)
+
+    def _select_target(self, state: GameState) -> Optional[Npc]:
+        """Select an NPC target according to the configured priority."""
+
+        if not state.npcs:
+            return None
+
+        npcs = list(state.npcs.values())
+
+        if not self._npc_priority:
+            # No priority configured: pick the first NPC.
+            return npcs[0]
+
+        def sort_key(npc: Npc) -> int:
+            try:
+                return self._npc_priority.index(npc.npc_type)
+            except ValueError:
+                # Types not in the priority list are deprioritised.
+                return len(self._npc_priority)
+
+        npcs.sort(key=sort_key)
+        return npcs[0]
+
+    def decide(self, state: GameState) -> BotAction | None:
+        """Choose which NPC to farm and mark it as the current combat target."""
+
+        log = self._logger
+
+        # If NPC hunting is disabled, do nothing.
+        if not self._hunt_npcs:
+            return None
+
+        # If we already have a target, keep it; Combat decides what to do.
+        if state.current_target_id is not None:
+            return None
+
+        target = self._select_target(state)
+
+        if target is None:
+            log.info("BasicFarm: no NPCs available to farm")
+            return None
+
+        state.current_target_id = target.id
+        state.in_combat = True
+        state.ticks_with_current_target = 0
+
+        log.info("BasicFarm: selected NPC %s as new target", target.id)
+
+        # Selecting a target does not itself produce an action; Combat
+        # will drive movement/attacks on subsequent ticks.
         return None

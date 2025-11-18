@@ -2,7 +2,7 @@
   "username": "YOUR_USERNAME",
   "password": "YOUR_PASSWORD",
   "server_url": "https://space-aces.com/",
-  "mode": "farm",
+  "mode": "patrol",
   "bot_settings": {
     "collect_boxes": true,
     "attack_npcs": true,
@@ -17,5 +17,20 @@
     "game_url": "https://space-aces.com/home",
     "headless": false,
     "anti_detect": true
+  },
+  "farm": {
+    "collect_boxes": false,
+    "hunt_npcs": true
+  },
+  "combat": {
+    "enabled": true,
+    "max_target_distance": 0.2,
+    "disengage_distance": 0.35,
+    "max_target_time_seconds": 60,
+    "npc_priority": "weak_npc,medium_npc"
+  },
+  "runtime": {
+    "max_ticks": 1000,
+    "max_seconds": 90
   }
 }

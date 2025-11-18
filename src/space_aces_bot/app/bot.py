@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -98,7 +99,9 @@ def main() -> None:
     driver_name = type(driver).__name__
     logger.info("[space_aces_bot] initialising driver=%s", driver_name)
 
-    max_ticks = 20
+    runtime_cfg = config.get("runtime", {}) or {}
+    max_ticks = int(runtime_cfg.get("max_ticks", 300))
+    max_seconds = float(runtime_cfg.get("max_seconds", 0))
     try:
         # Start the driver and perform login, if supported.
         if hasattr(driver, "start"):
@@ -178,36 +181,76 @@ def main() -> None:
                 driver_name,
             )
 
+        stop_reason = "normal"
+
         logger.info(
             "[space_aces_bot] starting main loop with driver=%s",
             driver_name,
         )
 
+        start_time = time.time()
+
         for _ in range(max_ticks):
+            now = time.time()
+            if max_seconds > 0 and (now - start_time) >= max_seconds:
+                stop_reason = f"max_seconds reached: {max_seconds}"
+                logger.info(
+                    "Main loop time limit reached (%.1f seconds), breaking",
+                    max_seconds,
+                )
+                break
+
             logger.info("Main loop tick %s", state.tick_counter)
 
             # Update game state based on what we see.
             vision.update_state(state)
 
-            # First, let safety decide if we need to escape or repair.
-            danger_action = safety.decide(state)
-            if danger_action is not None:
-                logger.info("Safety produced action: %s", danger_action)
-                driver.execute(danger_action, state)
-                state.tick_counter += 1
-                time.sleep(0.3)
+            # Let safety assess current danger level.
+            danger_level = safety.assess(state)
+            if state.tick_counter % 10 == 0:
+                logger.info("Safety: current danger level=%d", danger_level)
+
+            # Decide if we need to escape or repair.
+            escape_action = safety.decide(state)
+            if escape_action is not None:
+                logger.info("Safety produced ESCAPE action: %s", escape_action)
+                if hasattr(navigation, "enter_escape_mode"):
+                    navigation.enter_escape_mode()  # type: ignore[call-arg]
+                    nav_mode = getattr(navigation, "_mode", "unknown")
+                    logger.info("Navigation mode after ESCAPE: %s", nav_mode)
+
+                driver.execute(escape_action, state)
+                state.advance_tick()
+
+                # Small randomised delay between iterations.
+                time.sleep(random.uniform(0.15, 0.35))
                 continue
 
-            # If it's safe, try to farm or fight.
+            # If it's safe, ensure navigation is in patrol mode.
+            if hasattr(navigation, "enter_patrol_mode"):
+                navigation.enter_patrol_mode()  # type: ignore[call-arg]
+                nav_mode = getattr(navigation, "_mode", "unknown")
+                logger.debug("Navigation mode (patrol path): %s", nav_mode)
+
+            # If it's safe, let Farm try to produce a high-level action.
             farm_action = farm.decide(state)
-            primary_action = farm_action
+            if farm_action is not None:
+                logger.info("Farm produced action: %s", farm_action)
+                driver.execute(farm_action, state)
+                state.advance_tick()
 
-            if primary_action is None:
-                primary_action = combat.decide(state)
+                time.sleep(random.uniform(0.15, 0.35))
+                continue
 
-            if primary_action is not None:
-                logger.info("Primary module produced action: %s", primary_action)
-                driver.execute(primary_action, state)
+            # If Farm did not act, let Combat control tactical behaviour.
+            combat_action = combat.decide(state)
+            if combat_action is not None:
+                logger.info("Combat produced action: %s", combat_action)
+                driver.execute(combat_action, state)
+                state.advance_tick()
+
+                time.sleep(random.uniform(0.15, 0.35))
+                continue
 
             # Let navigation propose a move if needed.
             nav_action = navigation.tick(state)
@@ -215,12 +258,19 @@ def main() -> None:
                 logger.info("Navigation produced action: %s", nav_action)
                 driver.execute(nav_action, state)
 
-            # Tick bookkeeping and small delay between iterations.
-            state.tick_counter += 1
-            time.sleep(0.3)
+            # Tick bookkeeping and small randomised delay between iterations.
+            state.advance_tick()
+            time.sleep(random.uniform(0.15, 0.35))
+        else:
+            stop_reason = f"max_ticks reached: {max_ticks}"
 
         logger.info("[space_aces_bot] stopping main loop")
     finally:
+        logger.info(
+            "Main loop finished, reason=%s, total_ticks=%d",
+            stop_reason,
+            state.tick_counter,
+        )
         # Ensure the driver is properly stopped even if an error occurs.
         if hasattr(driver, "stop"):
             try:

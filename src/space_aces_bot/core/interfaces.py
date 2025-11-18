@@ -36,7 +36,7 @@ class Combat(ABC):
 
     @abstractmethod
     def decide(self, state: GameState) -> BotAction | None:
-        """Return an attack-related action for the current tick, or ``None``."""
+        """Control tactical behaviour for the current target (approach, attack, disengage)."""
 
 
 class Farm(ABC):
@@ -44,7 +44,7 @@ class Farm(ABC):
 
     @abstractmethod
     def decide(self, state: GameState) -> BotAction | None:
-        """Return an action to farm NPCs or resources, or ``None``."""
+        """Choose which target to farm and which high-level farming action to perform (e.g. select or switch NPC target)."""
 
 
 class Safety(ABC):
@@ -65,4 +65,3 @@ class Driver(ABC):
     @abstractmethod
     def execute(self, action: BotAction, state: GameState) -> None:
         """Execute the given high-level action in the context of ``state``."""
-

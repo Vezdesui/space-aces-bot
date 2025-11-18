@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from space_aces_bot.core.actions import ActionType, BotAction
 from space_aces_bot.core.game_state import GameState, Position, Ship
+from space_aces_bot.modules.combat import BasicCombat
+from space_aces_bot.modules.farm import BasicFarm
 
 
 def test_can_import_space_aces_bot() -> None:
@@ -32,3 +34,12 @@ def test_action_type_contains_expected_members() -> None:
     assert ActionType.MOVE.name == "MOVE"
     assert ActionType.ATTACK.name == "ATTACK"
     assert ActionType.COLLECT.name == "COLLECT"
+
+
+def test_can_import_basic_farm_and_combat() -> None:
+    # Construction should not raise and should accept minimal configs.
+    farm = BasicFarm(farm_cfg={}, combat_cfg={})
+    combat = BasicCombat(combat_cfg={})
+
+    assert farm is not None
+    assert combat is not None

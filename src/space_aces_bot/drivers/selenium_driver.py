@@ -923,9 +923,9 @@ class SeleniumDriver(Driver):
     def execute(self, action: BotAction, state: GameState) -> None:
         """Execute a high-level action using Selenium.
 
-        For now, most actions are only logged. Basic movement support
-        is provided for MOVE actions that include normalised map
-        coordinates in ``action.meta``.
+        For now, MOVE/ESCAPE actions with normalised map coordinates
+        trigger clicks on the game map. Other actions are logged but
+        not yet implemented.
         """
 
         if self._driver is None:
@@ -937,26 +937,16 @@ class SeleniumDriver(Driver):
             return
 
         self._logger.info(
-            "SeleniumDriver.execute: received action=%s target_id=%s position=%s meta=%s tick=%s",
+            "SeleniumDriver.execute: action=%s in_game=%s meta=%s",
             action.type,
-            action.target_id,
-            action.position,
-            action.meta,
-            state.tick_counter,
+            self.in_game,
+            getattr(action, "meta", None),
         )
 
         # Block game-related actions until we have successfully entered the game.
-        if action.type in {
-            ActionType.MOVE,
-            ActionType.ATTACK,
-            ActionType.COLLECT,
-            ActionType.JUMP,
-            ActionType.REPAIR,
-            ActionType.ESCAPE,
-        } and not self.in_game:
+        if not self.in_game:
             self._logger.warning(
-                "SeleniumDriver: skipping %s action because bot is not in-game yet "
-                "(in_game=False).",
+                "SeleniumDriver.execute: received %s but in_game=False; skipping action.",
                 action.type.name,
             )
             return
@@ -965,55 +955,50 @@ class SeleniumDriver(Driver):
             self._logger.info("SeleniumDriver: IDLE action, nothing to perform.")
             return
 
-        if action.type is ActionType.MOVE:
-            rel_x = None
-            rel_y = None
+        if action.type in {ActionType.MOVE, ActionType.ESCAPE}:
             meta = action.meta or {}
-
+            rel_x = rel_y = None
             if isinstance(meta, dict):
                 rel_x = meta.get("rel_x")
                 rel_y = meta.get("rel_y")
 
             if isinstance(rel_x, (int, float)) and isinstance(rel_y, (int, float)):
                 self._logger.info(
-                    "SeleniumDriver: MOVE action using normalised map coordinates "
-                    "rel_x=%.3f rel_y=%.3f.",
+                    "SeleniumDriver: %s using normalised map coordinates rel_x=%.3f rel_y=%.3f.",
+                    action.type.name,
                     float(rel_x),
                     float(rel_y),
                 )
                 try:
                     self._click_on_map_relative(float(rel_x), float(rel_y))
                 except Exception:
-                    # The helper already logs details, but we keep this as a guard.
                     self._logger.exception(
-                        "Error while performing MOVE click on map for rel=(%s, %s).",
+                        "Error while clicking on map for %s at rel=(%s, %s).",
+                        action.type.name,
                         rel_x,
                         rel_y,
                     )
             else:
-                pos = action.position
                 self._logger.warning(
-                    "SeleniumDriver: MOVE action received without normalised map "
-                    "coordinates in meta (expected 'rel_x' and 'rel_y'); "
-                    "action will be logged only. position=(%s, %s)",
-                    getattr(pos, "x", None),
-                    getattr(pos, "y", None),
+                    "SeleniumDriver.execute: MOVE/ESCAPE without rel_x/rel_y in meta, skipping."
                 )
-
             return
 
-        # Other actions are acknowledged but not yet implemented.
-        if action.type in {
-            ActionType.ATTACK,
-            ActionType.COLLECT,
-            ActionType.JUMP,
-            ActionType.REPAIR,
-            ActionType.ESCAPE,
-        }:
+        if action.type is ActionType.ATTACK:
+            # TODO: Implement actual attack execution:
+            #  - either by clicking on the NPC on the mini-map/main map
+            #  - or by pressing the appropriate attack key.
             self._logger.info(
-                "SeleniumDriver: received %s action for target_id=%s, "
-                "but this action type is not implemented yet.",
-                action.type.name,
+                "SeleniumDriver: ATTACK action on target_id=%s (not implemented yet)",
                 action.target_id,
             )
             return
+
+        # Other actions (ATTACK, COLLECT, JUMP, REPAIR, etc.) are acknowledged
+        # but not implemented yet.
+        self._logger.info(
+            "SeleniumDriver.execute: received unsupported action type=%s target_id=%s; "
+            "no concrete implementation yet.",
+            action.type.name,
+            action.target_id,
+        )

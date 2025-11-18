@@ -71,10 +71,45 @@ class GameState:
     ship: Ship
     current_map: str = "1-1"
     tick_counter: int = 0
+    current_target_id: Optional[str] = None
+    in_combat: bool = False
+    ticks_with_current_target: int = 0
     npcs: Dict[str, Npc] = field(default_factory=dict)
     resources: Dict[str, Resource] = field(default_factory=dict)
     enemies: Dict[str, EnemyPlayer] = field(default_factory=dict)
     portals: Dict[str, MapPortal] = field(default_factory=dict)
+    _last_target_id: Optional[str] = field(default=None, repr=False, compare=False)
+
+    def get_current_target(self) -> Optional[Npc]:
+        if self.current_target_id is None:
+            return None
+        return self.npcs.get(self.current_target_id)
+
+    def advance_tick(self) -> None:
+        """Advance global tick counter and update target-related counters."""
+
+        self.tick_counter += 1
+
+        current_id = self.current_target_id
+
+        # No active target: reset counters and tracking.
+        if current_id is None:
+            self.ticks_with_current_target = 0
+            self._last_target_id = None
+            return
+
+        # If target disappeared from NPC list, reset and clear.
+        if current_id not in self.npcs:
+            self.ticks_with_current_target = 0
+            self._last_target_id = None
+            return
+
+        # If target changed, reset per-target tick counter.
+        if self._last_target_id != current_id:
+            self.ticks_with_current_target = 0
+
+        self.ticks_with_current_target += 1
+        self._last_target_id = current_id
 
     def __repr__(self) -> str:
         return (

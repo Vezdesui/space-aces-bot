@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+import random
+from typing import Optional
 
 from space_aces_bot.core.actions import ActionType, BotAction
 from space_aces_bot.core.game_state import GameState, Position
@@ -9,24 +10,24 @@ from space_aces_bot.core.interfaces import Navigation
 
 logger = logging.getLogger(__name__)
 
+MOVE_EVERY_N_TICKS = 10
+
 
 class SimpleNavigation(Navigation):
-    """Simple navigation module that patrols predefined waypoints.
+    """Simple navigation module with patrol and escape modes.
 
-    The module keeps a list of patrol waypoints in normalised map
-    coordinates (values between 0.0 and 1.0). On every ``tick`` it
-    advances a tick counter and, once enough ticks have passed, emits
-    a MOVE action targeting the next waypoint in the patrol loop.
+    In ``patrol`` mode the module walks a list of normalised waypoints
+    (values between 0.0 and 1.0) and periodically issues MOVE actions.
+    In ``escape`` mode it emits MOVE actions towards a predefined safe
+    point on every tick.
     """
 
-    def __init__(self, tick_interval: int = 10) -> None:
-        # Optional world-space destination set via `set_destination`. It is
-        # currently stored for future use; patrol is based on normalised
-        # waypoints.
+    def __init__(self) -> None:
+        # Optional world-space destination set via `set_destination`.
         self.destination: Optional[Position] = None
 
         # List of patrol points in normalised coordinates (rel_x, rel_y).
-        self._patrol_points: List[Tuple[float, float]] = [
+        self._patrol_points: list[tuple[float, float]] = [
             (0.2, 0.2),
             (0.8, 0.2),
             (0.8, 0.8),
@@ -34,51 +35,107 @@ class SimpleNavigation(Navigation):
         ]
         self._current_index: int = 0
         self._ticks_since_last_move: int = 0
-        self._tick_interval: int = max(1, int(tick_interval))
+
+        # Mode: "patrol" or "escape".
+        self._mode: str = "patrol"
 
     def set_destination(self, position: Position) -> None:
         logger.info("Navigation: setting destination to %s", position)
         self.destination = position
 
-    def tick(self, state: GameState) -> BotAction | None:
-        if not self._patrol_points:
-            logger.debug("Navigation.tick: no patrol points configured, doing nothing.")
-            return None
-
-        self._ticks_since_last_move += 1
-        if self._ticks_since_last_move < self._tick_interval:
-            logger.debug(
-                "Navigation.tick: waiting before next patrol move "
-                "(ticks_since_last_move=%s, interval=%s).",
-                self._ticks_since_last_move,
-                self._tick_interval,
-            )
-            return None
-
+    # ------------------------------------------------------------------
+    # Mode control
+    # ------------------------------------------------------------------
+    def enter_escape_mode(self) -> None:
+        self._mode = "escape"
         self._ticks_since_last_move = 0
 
-        waypoint_index = self._current_index
-        rel_x, rel_y = self._patrol_points[waypoint_index]
+    def enter_patrol_mode(self) -> None:
+        if self._mode != "patrol":
+            self._mode = "patrol"
+            self._ticks_since_last_move = 0
 
-        logger.info(
-            "Navigation.tick: selecting patrol waypoint %s at rel=(%.3f, %.3f).",
-            waypoint_index,
-            rel_x,
-            rel_y,
+    # ------------------------------------------------------------------
+    # Tick logic
+    # ------------------------------------------------------------------
+    def tick(self, state: GameState) -> BotAction | None:  # noqa: ARG002
+        """Return periodic MOVE actions in patrol/escape modes.
+
+        - In ``escape`` mode a MOVE towards a fixed safe point is
+          returned every tick.
+        - In ``patrol`` mode a MOVE towards the next waypoint is
+          returned roughly every ``MOVE_EVERY_N_TICKS`` ticks.
+        """
+
+        self._ticks_since_last_move += 1
+        logger.debug(
+            "Navigation.tick: mode=%s, ticks_since_last_move=%d",
+            self._mode,
+            self._ticks_since_last_move,
         )
 
-        self._current_index = (self._current_index + 1) % len(self._patrol_points)
+        # Escape mode: always move towards a fixed safe point.
+        if self._mode == "escape":
+            safe_x, safe_y = 0.5, 0.5
+            logger.info(
+                "Navigation.tick: ESCAPE MOVE to safe point rel=(%.3f, %.3f).",
+                safe_x,
+                safe_y,
+            )
+            return BotAction(
+                type=ActionType.MOVE,
+                position=None,
+                meta={"rel_x": safe_x, "rel_y": safe_y, "escape": True},
+            )
 
-        action = BotAction(
-            type=ActionType.MOVE,
-            position=self.destination,
-            meta={
-                "rel_x": rel_x,
-                "rel_y": rel_y,
-                "waypoint_index": waypoint_index,
-                "reason": "patrol_waypoint",
-            },
-        )
+        # Patrol mode: emit MOVE roughly every MOVE_EVERY_N_TICKS ticks.
+        if self._mode == "patrol":
+            if self._ticks_since_last_move < MOVE_EVERY_N_TICKS:
+                logger.debug(
+                    "Navigation.tick: PATROL idle "
+                    "(ticks_since_last_move=%d, move_every=%d).",
+                    self._ticks_since_last_move,
+                    MOVE_EVERY_N_TICKS,
+                )
+                return None
 
-        logger.info("Navigation.tick: emitting MOVE action %s", action)
-        return action
+            self._ticks_since_last_move = 0
+
+            if not self._patrol_points:
+                logger.debug(
+                    "Navigation.tick: no patrol points configured, doing nothing."
+                )
+                return None
+
+            base_x, base_y = self._patrol_points[self._current_index]
+
+            dx = random.uniform(-0.05, 0.05)
+            dy = random.uniform(-0.05, 0.05)
+            rel_x = min(max(base_x + dx, 0.05), 0.95)
+            rel_y = min(max(base_y + dy, 0.05), 0.95)
+
+            # Advance waypoint index (wrap around).
+            self._current_index = (self._current_index + 1) % len(self._patrol_points)
+
+            logger.info(
+                "Navigation.tick: PATROL MOVE to rel=(%.3f, %.3f) "
+                "(base_rel=(%.3f, %.3f), waypoint_index=%d).",
+                rel_x,
+                rel_y,
+                base_x,
+                base_y,
+                self._current_index,
+            )
+
+            return BotAction(
+                type=ActionType.MOVE,
+                position=None,
+                meta={
+                    "rel_x": rel_x,
+                    "rel_y": rel_y,
+                    "waypoint_index": self._current_index,
+                },
+            )
+
+        logger.debug("Navigation.tick: unknown mode '%s', doing nothing.", self._mode)
+        return None
